@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import fnmatch
 import json
 from pathlib import Path
+import re
+import statistics
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
+import math
 
 from .model import JsonDocument, Record
 
@@ -22,6 +26,8 @@ class JsonLogViewerApp:
         self.display_column_vars: dict[str, tk.BooleanVar] = {}
         self.filter_vars: dict[str, tk.StringVar] = {}
         self.filter_entries: dict[str, ttk.Entry] = {}
+        self.derived_columns: dict[str, str] = {}
+        self.derived_values: dict[int, dict[str, str]] = {}
         self.sort_column: str = ""
         self.sort_descending = False
 
@@ -29,6 +35,7 @@ class JsonLogViewerApp:
         self.status_var = tk.StringVar(value="Open a JSON file to begin.")
         self.global_search_var = tk.StringVar()
         self.show_deleted_var = tk.BooleanVar(value=True)
+        self.derived_name_var = tk.StringVar()
 
         self._build_layout()
 
@@ -159,7 +166,55 @@ class JsonLogViewerApp:
         ttk.Button(actions, text="Preview Changes", command=self.show_diff_preview).grid(row=3, column=0, sticky="ew", pady=4)
         ttk.Button(actions, text="Save With Backup", command=self.save_changes).grid(row=4, column=0, sticky="ew", pady=(4, 0))
 
-        ttk.Frame(parent).grid(row=1, column=0, sticky="nsew")
+        derived_frame = ttk.LabelFrame(parent, text="Derived Columns", padding=8)
+        derived_frame.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
+        derived_frame.columnconfigure(0, weight=1)
+        derived_frame.rowconfigure(3, weight=1)
+
+        ttk.Label(derived_frame, text="Column name").grid(row=0, column=0, sticky="w")
+        ttk.Entry(derived_frame, textvariable=self.derived_name_var).grid(row=1, column=0, sticky="ew", pady=(2, 6))
+        ttk.Label(
+            derived_frame,
+            text="Script returns `result`. Helpers: value(name), num(name), values(pattern), nums(pattern), mean(...).",
+            justify="left",
+        ).grid(row=2, column=0, sticky="w")
+
+        script_panel = ttk.Frame(derived_frame)
+        script_panel.grid(row=3, column=0, sticky="nsew", pady=(6, 6))
+        script_panel.columnconfigure(0, weight=1)
+        script_panel.rowconfigure(0, weight=1)
+
+        self.derived_script_text = tk.Text(script_panel, height=12, wrap="none")
+        self.derived_script_text.grid(row=0, column=0, sticky="nsew")
+        self.derived_script_text.bind("<KeyRelease>", lambda _event: self.highlight_script_box())
+        script_y = ttk.Scrollbar(script_panel, orient="vertical", command=self.derived_script_text.yview)
+        script_y.grid(row=0, column=1, sticky="ns")
+        script_x = ttk.Scrollbar(script_panel, orient="horizontal", command=self.derived_script_text.xview)
+        script_x.grid(row=1, column=0, sticky="ew")
+        self.derived_script_text.configure(yscrollcommand=script_y.set, xscrollcommand=script_x.set)
+        self._configure_script_tags()
+
+        derived_buttons = ttk.Frame(derived_frame)
+        derived_buttons.grid(row=4, column=0, sticky="ew")
+        derived_buttons.columnconfigure(0, weight=1)
+        derived_buttons.columnconfigure(1, weight=1)
+        derived_buttons.columnconfigure(2, weight=1)
+        ttk.Button(derived_buttons, text="Add / Update", command=self.save_derived_column).grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        ttk.Button(derived_buttons, text="Load Selected", command=self.load_selected_derived_column).grid(row=0, column=1, sticky="ew", padx=4)
+        ttk.Button(derived_buttons, text="Remove", command=self.remove_derived_column).grid(row=0, column=2, sticky="ew", padx=(4, 0))
+
+        list_panel = ttk.Frame(derived_frame)
+        list_panel.grid(row=5, column=0, sticky="nsew", pady=(6, 0))
+        list_panel.columnconfigure(0, weight=1)
+        list_panel.rowconfigure(0, weight=1)
+        derived_frame.rowconfigure(5, weight=1)
+
+        self.derived_listbox = tk.Listbox(list_panel, exportselection=False, height=5)
+        self.derived_listbox.grid(row=0, column=0, sticky="nsew")
+        self.derived_listbox.bind("<<ListboxSelect>>", lambda _event: self.load_selected_derived_column())
+        derived_list_scroll = ttk.Scrollbar(list_panel, orient="vertical", command=self.derived_listbox.yview)
+        derived_list_scroll.grid(row=0, column=1, sticky="ns")
+        self.derived_listbox.configure(yscrollcommand=derived_list_scroll.set)
 
     def _build_detail(self, detail_frame: ttk.Frame) -> None:
         detail_frame.columnconfigure(0, weight=1)
@@ -244,6 +299,11 @@ class JsonLogViewerApp:
         self.global_search_var.set("")
         self.column_search_var.set("")
         self.show_deleted_var.set(True)
+        self.derived_columns.clear()
+        self.derived_values.clear()
+        self.derived_name_var.set("")
+        self.derived_script_text.delete("1.0", tk.END)
+        self.derived_listbox.delete(0, tk.END)
         self.sort_column = ""
         self.sort_descending = False
         self._populate_column_selectors()
@@ -269,7 +329,10 @@ class JsonLogViewerApp:
         if not self.document:
             return
 
-        columns = self.document.columns
+        columns = self.all_columns()
+        previous_display = {
+            column for column, variable in self.display_column_vars.items() if variable.get()
+        }
         self.display_column_vars = {}
 
         for child in self.display_columns_container.winfo_children():
@@ -277,7 +340,7 @@ class JsonLogViewerApp:
 
         default_display = set(default_columns(columns))
         for column in columns:
-            display_var = tk.BooleanVar(value=column in default_display)
+            display_var = tk.BooleanVar(value=column in previous_display if previous_display else column in default_display)
             self.display_column_vars[column] = display_var
 
         self.render_display_column_checkboxes()
@@ -295,6 +358,7 @@ class JsonLogViewerApp:
 
         if not visible_columns:
             ttk.Label(self.display_columns_container, text="No matching columns.").grid(row=0, column=0, sticky="w")
+            self.display_columns_canvas.yview_moveto(0.0)
             return
 
         for row_index, column in enumerate(visible_columns):
@@ -304,6 +368,8 @@ class JsonLogViewerApp:
                 variable=self.display_column_vars[column],
                 command=self.apply_display_columns,
             ).grid(row=row_index, column=0, sticky="w")
+
+        self.display_columns_canvas.yview_moveto(0.0)
 
     def apply_display_columns(self) -> None:
         self.display_columns = [
@@ -336,7 +402,7 @@ class JsonLogViewerApp:
         if not self.document:
             return
 
-        for row_index, column in enumerate(self.document.columns):
+        for row_index, column in enumerate(self.all_columns()):
             ttk.Label(self.filter_entries_container, text=column).grid(row=row_index, column=0, sticky="nw", padx=(0, 8), pady=2)
             variable = tk.StringVar(value=existing_values.get(column, ""))
             variable.trace_add("write", lambda *_args: self.refresh_table())
@@ -345,10 +411,60 @@ class JsonLogViewerApp:
             self.filter_vars[column] = variable
             self.filter_entries[column] = entry
 
+        self.filter_entries_canvas.yview_moveto(0.0)
         self.refresh_table()
 
     def current_column_filters(self) -> dict[str, str]:
         return {column: variable.get() for column, variable in self.filter_vars.items()}
+
+    def all_columns(self) -> list[str]:
+        if not self.document:
+            return []
+        return [*self.document.columns, *sorted(self.derived_columns)]
+
+    def record_values(self, record: Record) -> dict[str, str]:
+        derived = self.derived_values.get(record.index, {})
+        return {**record.flattened, **derived}
+
+    def compile_regex(self, pattern: str, label: str) -> re.Pattern[str] | None:
+        normalized = pattern.strip()
+        if not normalized:
+            return None
+        try:
+            return re.compile(normalized, re.IGNORECASE)
+        except re.error as exc:
+            raise ValueError(f"Invalid regex in {label}: {exc}") from exc
+
+    def filtered_records_for_view(self) -> list[Record]:
+        if not self.document:
+            return []
+
+        global_pattern = self.compile_regex(self.global_search_var.get(), "global search")
+        column_patterns = {
+            column: self.compile_regex(value, f"filter '{column}'")
+            for column, value in self.current_column_filters().items()
+            if value.strip()
+        }
+
+        source_records = self.document.record_models if self.show_deleted_var.get() else self.document.active_records()
+        filtered: list[Record] = []
+        for record in source_records:
+            values = self.record_values(record)
+            if global_pattern:
+                haystack = " | ".join(values.values())
+                if not global_pattern.search(haystack):
+                    continue
+
+            include = True
+            for column, pattern in column_patterns.items():
+                if not pattern.search(values.get(column, "")):
+                    include = False
+                    break
+
+            if include:
+                filtered.append(record)
+
+        return filtered
 
     def refresh_table(self) -> None:
         if not self.document:
@@ -357,11 +473,7 @@ class JsonLogViewerApp:
             return
 
         try:
-            records = self.document.filtered_records(
-                global_search=self.global_search_var.get(),
-                column_filters=self.current_column_filters(),
-                include_deleted=self.show_deleted_var.get(),
-            )
+            records = self.filtered_records_for_view()
         except ValueError as exc:
             self.tree.delete(*self.tree.get_children())
             self.row_map.clear()
@@ -372,7 +484,12 @@ class JsonLogViewerApp:
         if self.sort_column:
             records = sorted(
                 records,
-                key=lambda record: sort_key_for_record(record, self.sort_column, self.document.deleted_indices),
+                key=lambda record: sort_key_for_values(
+                    self.record_values(record),
+                    record,
+                    self.sort_column,
+                    self.document.deleted_indices,
+                ),
                 reverse=self.sort_descending,
             )
         self.filtered_records = records
@@ -394,7 +511,8 @@ class JsonLogViewerApp:
         for record in records:
             item_id = str(record.index)
             status = "deleted" if record.index in self.document.deleted_indices else "active"
-            values = [status, *[record.flattened.get(column, "") for column in columns[1:]]]
+            record_values = self.record_values(record)
+            values = [status, *[record_values.get(column, "") for column in columns[1:]]]
             tags = ("deleted",) if status == "deleted" else ()
             self.tree.insert("", tk.END, iid=item_id, values=values, tags=tags)
             self.row_map[item_id] = record.index
@@ -517,7 +635,8 @@ class JsonLogViewerApp:
 
         deleted_tree.tag_configure("deleted", foreground="#a00000")
         for record in deleted:
-            values = ["deleted", *[record.flattened.get(column, "") for column in preview_columns[1:]]]
+            record_values = self.record_values(record)
+            values = ["deleted", *[record_values.get(column, "") for column in preview_columns[1:]]]
             deleted_tree.insert("", tk.END, values=values, tags=("deleted",))
 
         deleted_table_y = ttk.Scrollbar(deleted_table_frame, orient="vertical", command=deleted_tree.yview)
@@ -592,6 +711,108 @@ class JsonLogViewerApp:
             f"Backup created at:\n{result.backup_path}\n\nRemoved {result.deleted_count} record(s).",
         )
 
+    def save_derived_column(self) -> None:
+        if not self.document:
+            return
+
+        name = self.derived_name_var.get().strip()
+        script = self.derived_script_text.get("1.0", tk.END).strip()
+        if not name:
+            messagebox.showinfo("Missing name", "Provide a name for the derived column.")
+            return
+        if name == "__status__":
+            messagebox.showinfo("Reserved name", "`__status__` is reserved.")
+            return
+        if name in self.document.columns:
+            messagebox.showinfo("Name conflict", "This name already exists as a real column.")
+            return
+        if not script:
+            messagebox.showinfo("Missing script", "Provide a Python expression or script that sets `result`.")
+            return
+
+        try:
+            computed = self.compute_derived_column_values(name, script)
+        except Exception as exc:
+            messagebox.showerror("Derived column failed", str(exc))
+            return
+
+        self.derived_columns[name] = script
+        for record_index, value in computed.items():
+            self.derived_values.setdefault(record_index, {})[name] = value
+
+        self.refresh_derived_column_list()
+        self._populate_column_selectors()
+        self.status_var.set(f"Derived column '{name}' updated for {len(computed)} records.")
+
+    def refresh_derived_column_list(self) -> None:
+        current = self.derived_name_var.get().strip()
+        self.derived_listbox.delete(0, tk.END)
+        names = sorted(self.derived_columns)
+        for name in names:
+            self.derived_listbox.insert(tk.END, name)
+        if current:
+            if current in names:
+                self.derived_listbox.selection_set(names.index(current))
+
+    def load_selected_derived_column(self) -> None:
+        selection = self.derived_listbox.curselection()
+        if not selection:
+            return
+        name = self.derived_listbox.get(selection[0])
+        self.derived_name_var.set(name)
+        self.derived_script_text.delete("1.0", tk.END)
+        self.derived_script_text.insert("1.0", self.derived_columns.get(name, ""))
+        self.highlight_script_box()
+
+    def remove_derived_column(self) -> None:
+        selection = self.derived_listbox.curselection()
+        if not selection:
+            messagebox.showinfo("No selection", "Select a derived column to remove.")
+            return
+        name = self.derived_listbox.get(selection[0])
+        self.derived_columns.pop(name, None)
+        for values in self.derived_values.values():
+            values.pop(name, None)
+        self.refresh_derived_column_list()
+        self._populate_column_selectors()
+        self.status_var.set(f"Derived column '{name}' removed.")
+
+    def compute_derived_column_values(self, name: str, script: str) -> dict[int, str]:
+        if not self.document:
+            return {}
+
+        compiled: dict[int, str] = {}
+        for record in self.document.record_models:
+            merged = self.record_values(record)
+            result = execute_derived_script(script, merged)
+            compiled[record.index] = format_derived_result(result)
+        return compiled
+
+    def _configure_script_tags(self) -> None:
+        self.derived_script_text.tag_configure("keyword", foreground="#7c3aed")
+        self.derived_script_text.tag_configure("string", foreground="#047857")
+        self.derived_script_text.tag_configure("comment", foreground="#6b7280")
+        self.derived_script_text.tag_configure("number", foreground="#b45309")
+
+    def highlight_script_box(self) -> None:
+        text = self.derived_script_text.get("1.0", tk.END)
+        for tag in ("keyword", "string", "comment", "number"):
+            self.derived_script_text.tag_remove(tag, "1.0", tk.END)
+
+        for match in re.finditer(r"\b(?:and|as|assert|break|class|continue|def|elif|else|except|False|finally|for|from|if|import|in|is|lambda|None|not|or|pass|raise|return|True|try|while|with|yield|result)\b", text):
+            self._tag_script_match("keyword", match.start(), match.end())
+        for match in re.finditer(r"#.*$", text, re.MULTILINE):
+            self._tag_script_match("comment", match.start(), match.end())
+        for match in re.finditer(r"(?:'[^'\\]*(?:\\.[^'\\]*)*'|\"[^\"\\]*(?:\\.[^\"\\]*)*\")", text):
+            self._tag_script_match("string", match.start(), match.end())
+        for match in re.finditer(r"\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b", text):
+            self._tag_script_match("number", match.start(), match.end())
+
+    def _tag_script_match(self, tag: str, start: int, end: int) -> None:
+        start_index = f"1.0+{start}c"
+        end_index = f"1.0+{end}c"
+        self.derived_script_text.tag_add(tag, start_index, end_index)
+
 
 def default_columns(columns: list[str], limit: int = 8) -> list[str]:
     scalar_like = [column for column in columns if "." not in column and "[" not in column]
@@ -599,12 +820,17 @@ def default_columns(columns: list[str], limit: int = 8) -> list[str]:
     return preferred[:limit]
 
 
-def sort_key_for_record(record: Record, column: str, deleted_indices: set[int]) -> tuple[int, int, str | float]:
+def sort_key_for_values(
+    values: dict[str, str],
+    record: Record,
+    column: str,
+    deleted_indices: set[int],
+) -> tuple[int, int, str | float]:
     if column == "__status__":
         status = "deleted" if record.index in deleted_indices else "active"
         return (0, 0, status)
 
-    raw_value = record.flattened.get(column, "")
+    raw_value = values.get(column, "")
     normalized = raw_value.strip().lower()
 
     try:
@@ -633,3 +859,84 @@ def build_altered_rows_summary(deleted: list[Record]) -> str:
     )
 
     return "\n\n".join(sections)
+
+
+def execute_derived_script(script: str, record_values: dict[str, str]) -> object:
+    def value(name: str, default: str = "") -> str:
+        return record_values.get(name, default)
+
+    def values(pattern: str) -> list[str]:
+        return [val for key, val in record_values.items() if fnmatch.fnmatch(key, pattern)]
+
+    def num(name: str, default: float | None = None) -> float | None:
+        raw = record_values.get(name, "")
+        if raw == "":
+            return default
+        return float(raw)
+
+    def nums(pattern: str) -> list[float]:
+        result: list[float] = []
+        for item in values(pattern):
+            if item == "":
+                continue
+            result.append(float(item))
+        return result
+
+    def mean(items: list[float], default: float | None = None) -> float | None:
+        return statistics.fmean(items) if items else default
+
+    safe_builtins = {
+        "abs": abs,
+        "all": all,
+        "any": any,
+        "bool": bool,
+        "dict": dict,
+        "enumerate": enumerate,
+        "float": float,
+        "int": int,
+        "len": len,
+        "list": list,
+        "max": max,
+        "min": min,
+        "round": round,
+        "set": set,
+        "sorted": sorted,
+        "str": str,
+        "sum": sum,
+        "tuple": tuple,
+        "zip": zip,
+    }
+
+    local_scope = {
+        "record": dict(record_values),
+        "value": value,
+        "values": values,
+        "num": num,
+        "nums": nums,
+        "mean": mean,
+        "math": math,
+        "statistics": statistics,
+        "result": None,
+    }
+
+    # Derived columns are intentionally GUI-only, but we still run user code inside a
+    # small namespace so common calculations are easy while accidental side effects stay limited.
+    try:
+        code = compile(script, "<derived-column>", "eval")
+        return eval(code, {"__builtins__": safe_builtins}, local_scope)
+    except SyntaxError:
+        code = compile(script, "<derived-column>", "exec")
+        exec(code, {"__builtins__": safe_builtins}, local_scope)
+        if local_scope.get("result") is None:
+            raise ValueError("Derived-column script must evaluate to a value or assign to `result`.")
+        return local_scope["result"]
+
+
+def format_derived_result(result: object) -> str:
+    if result is None:
+        return ""
+    if isinstance(result, float):
+        return f"{result:.12g}"
+    if isinstance(result, (list, dict, tuple, set)):
+        return json.dumps(result, ensure_ascii=False)
+    return str(result)
