@@ -5,6 +5,7 @@ from datetime import datetime
 import difflib
 import json
 from pathlib import Path
+import re
 from typing import Any
 
 
@@ -68,9 +69,9 @@ class JsonDocument:
         column_filters: dict[str, str],
         include_deleted: bool = False,
     ) -> list[Record]:
-        global_search = global_search.strip().lower()
-        normalized_filters = {
-            column: value.strip().lower()
+        global_pattern = compile_search_pattern(global_search, "global search")
+        compiled_filters = {
+            column: compile_search_pattern(value, f"filter '{column}'")
             for column, value in column_filters.items()
             if value.strip()
         }
@@ -78,15 +79,15 @@ class JsonDocument:
         filtered: list[Record] = []
         source_records = self.record_models if include_deleted else self.active_records()
         for record in source_records:
-            if global_search:
-                haystack = " | ".join(record.flattened.values()).lower()
-                if global_search not in haystack:
+            if global_pattern:
+                haystack = " | ".join(record.flattened.values())
+                if not global_pattern.search(haystack):
                     continue
 
             include = True
-            for column, expected in normalized_filters.items():
-                actual = record.flattened.get(column, "").lower()
-                if expected not in actual:
+            for column, pattern in compiled_filters.items():
+                actual = record.flattened.get(column, "")
+                if not pattern.search(actual):
                     include = False
                     break
 
@@ -250,3 +251,14 @@ def format_scalar(value: Any) -> str:
     if isinstance(value, float):
         return f"{value:.12g}"
     return str(value)
+
+
+def compile_search_pattern(pattern: str, label: str) -> re.Pattern[str] | None:
+    normalized = pattern.strip()
+    if not normalized:
+        return None
+
+    try:
+        return re.compile(normalized, re.IGNORECASE)
+    except re.error as exc:
+        raise ValueError(f"Invalid regex in {label}: {exc}") from exc
