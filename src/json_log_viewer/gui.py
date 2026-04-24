@@ -18,13 +18,17 @@ class JsonLogViewerApp:
         self.filtered_records: list[Record] = []
         self.row_map: dict[str, int] = {}
         self.display_columns: list[str] = []
+        self.column_search_var = tk.StringVar()
+        self.display_column_vars: dict[str, tk.BooleanVar] = {}
         self.filter_vars: dict[str, tk.StringVar] = {}
         self.filter_entries: dict[str, ttk.Entry] = {}
+        self.sort_column: str = ""
+        self.sort_descending = False
 
         self.file_label_var = tk.StringVar(value="No file loaded")
         self.status_var = tk.StringVar(value="Open a JSON file to begin.")
         self.global_search_var = tk.StringVar()
-        self.show_deleted_var = tk.BooleanVar(value=False)
+        self.show_deleted_var = tk.BooleanVar(value=True)
 
         self._build_layout()
 
@@ -45,18 +49,38 @@ class JsonLogViewerApp:
         ttk.Button(top_bar, text="Preview Changes", command=self.show_diff_preview).grid(row=0, column=3, padx=4)
         ttk.Button(top_bar, text="Save With Backup", command=self.save_changes).grid(row=0, column=4, padx=(4, 0))
 
-        main_pane = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
-        main_pane.grid(row=1, column=0, sticky="nsew")
+        main_frame = ttk.Frame(self.root, padding=8)
+        main_frame.grid(row=1, column=0, sticky="nsew")
+        main_frame.columnconfigure(0, weight=0, minsize=460)
+        main_frame.columnconfigure(1, weight=2, minsize=420)
+        main_frame.columnconfigure(2, weight=2, minsize=420)
+        main_frame.rowconfigure(0, weight=3)
+        main_frame.rowconfigure(1, weight=2)
 
-        controls = ttk.Frame(main_pane, padding=8)
-        controls.columnconfigure(0, weight=1)
-        main_pane.add(controls, weight=0)
+        left_sidebar = ttk.Frame(main_frame, padding=(0, 0, 8, 0))
+        left_sidebar.grid(row=0, column=0, rowspan=2, sticky="nsew")
+        left_sidebar.columnconfigure(0, weight=1)
 
-        content = ttk.PanedWindow(main_pane, orient=tk.VERTICAL)
-        main_pane.add(content, weight=1)
+        table_container = ttk.Frame(main_frame)
+        table_container.grid(row=0, column=1, columnspan=2, sticky="nsew")
+        table_container.columnconfigure(0, weight=1)
+        table_container.rowconfigure(0, weight=1)
 
-        self._build_controls(controls)
-        self._build_content(content)
+        middle_bottom = ttk.Frame(main_frame, padding=(8, 8, 8, 0))
+        middle_bottom.grid(row=1, column=1, sticky="nsew")
+        middle_bottom.columnconfigure(0, weight=1)
+        middle_bottom.rowconfigure(0, weight=0)
+        middle_bottom.rowconfigure(1, weight=1)
+
+        right_bottom = ttk.Frame(main_frame, padding=(8, 8, 0, 0))
+        right_bottom.grid(row=1, column=2, sticky="nsew")
+        right_bottom.columnconfigure(0, weight=1)
+        right_bottom.rowconfigure(0, weight=1)
+
+        self._build_controls(left_sidebar)
+        self._build_table(table_container)
+        self._build_middle_bottom(middle_bottom)
+        self._build_detail(right_bottom)
 
         status_bar = ttk.Label(self.root, textvariable=self.status_var, anchor="w", padding=8)
         status_bar.grid(row=2, column=0, sticky="ew")
@@ -66,7 +90,7 @@ class JsonLogViewerApp:
         search_frame.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         search_frame.columnconfigure(0, weight=1)
 
-        ttk.Label(search_frame, text="Global contains").grid(row=0, column=0, sticky="w")
+        ttk.Label(search_frame, text="Global regex").grid(row=0, column=0, sticky="w")
         search_entry = ttk.Entry(search_frame, textvariable=self.global_search_var)
         search_entry.grid(row=1, column=0, sticky="ew", pady=(2, 6))
         search_entry.bind("<KeyRelease>", lambda _event: self.refresh_table())
@@ -80,84 +104,38 @@ class JsonLogViewerApp:
         columns_frame = ttk.LabelFrame(parent, text="Columns", padding=8)
         columns_frame.grid(row=1, column=0, sticky="nsew", pady=(0, 8))
         columns_frame.columnconfigure(0, weight=1)
-        columns_frame.rowconfigure(1, weight=1)
+        columns_frame.rowconfigure(3, weight=1)
         parent.rowconfigure(1, weight=1)
 
         ttk.Label(columns_frame, text="Select visible columns").grid(row=0, column=0, sticky="w")
+        ttk.Label(columns_frame, text="Search column names").grid(row=1, column=0, sticky="w", pady=(2, 0))
+        column_search_entry = ttk.Entry(columns_frame, textvariable=self.column_search_var)
+        column_search_entry.grid(row=2, column=0, sticky="ew", pady=(2, 6))
+        column_search_entry.bind("<KeyRelease>", lambda _event: self.render_display_column_checkboxes())
+        ttk.Label(columns_frame, text="Checkboxes keep existing selections when you add more.").grid(row=4, column=0, sticky="w", pady=(6, 6))
 
-        self.display_listbox = tk.Listbox(columns_frame, selectmode=tk.EXTENDED, exportselection=False, height=14)
-        self.display_listbox.grid(row=1, column=0, sticky="nsew")
-        self.display_listbox.bind("<<ListboxSelect>>", lambda _event: self.apply_display_columns())
-        display_scroll = ttk.Scrollbar(columns_frame, orient="vertical", command=self.display_listbox.yview)
-        display_scroll.grid(row=1, column=1, sticky="ns")
-        self.display_listbox.configure(yscrollcommand=display_scroll.set)
+        self.display_columns_container, self.display_columns_canvas = self._build_scrollable_checkbox_panel(columns_frame, row=3, height=320)
 
         display_buttons = ttk.Frame(columns_frame)
-        display_buttons.grid(row=2, column=0, sticky="ew", pady=(6, 0))
+        display_buttons.grid(row=5, column=0, sticky="ew", pady=(6, 0))
         display_buttons.columnconfigure(0, weight=1)
         display_buttons.columnconfigure(1, weight=1)
         ttk.Button(display_buttons, text="Select All", command=self.select_all_columns).grid(row=0, column=0, sticky="ew", padx=(0, 4))
         ttk.Button(display_buttons, text="Reset Defaults", command=self.reset_default_columns).grid(row=0, column=1, sticky="ew")
 
-        filter_select_frame = ttk.LabelFrame(parent, text="Filter Columns", padding=8)
-        filter_select_frame.grid(row=2, column=0, sticky="nsew", pady=(0, 8))
-        filter_select_frame.columnconfigure(0, weight=1)
-        filter_select_frame.rowconfigure(1, weight=1)
+        filter_frame = ttk.LabelFrame(parent, text="Active Filters", padding=8)
+        filter_frame.grid(row=2, column=0, sticky="nsew")
+        filter_frame.columnconfigure(0, weight=1)
+        filter_frame.rowconfigure(0, weight=1)
         parent.rowconfigure(2, weight=1)
 
-        ttk.Label(filter_select_frame, text="Select columns to filter on").grid(row=0, column=0, sticky="w")
+        ttk.Label(filter_frame, text="Regex filters. Any non-empty field is active.").grid(row=1, column=0, sticky="w", pady=(0, 6))
 
-        self.filter_column_listbox = tk.Listbox(filter_select_frame, selectmode=tk.EXTENDED, exportselection=False, height=10)
-        self.filter_column_listbox.grid(row=1, column=0, sticky="nsew")
-        self.filter_column_listbox.bind("<<ListboxSelect>>", lambda _event: self.rebuild_filter_entries())
-        filter_select_scroll = ttk.Scrollbar(filter_select_frame, orient="vertical", command=self.filter_column_listbox.yview)
-        filter_select_scroll.grid(row=1, column=1, sticky="ns")
-        self.filter_column_listbox.configure(yscrollcommand=filter_select_scroll.set)
+        self.filter_entries_container, self.filter_entries_canvas = self._build_scrollable_checkbox_panel(filter_frame, row=0, height=340)
 
-        filter_frame = ttk.LabelFrame(parent, text="Active Filters", padding=8)
-        filter_frame.grid(row=3, column=0, sticky="ew", pady=(0, 8))
-        filter_frame.columnconfigure(0, weight=1)
-
-        canvas = tk.Canvas(filter_frame, height=220, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(filter_frame, orient="vertical", command=canvas.yview)
-        canvas.configure(yscrollcommand=scrollbar.set)
-        canvas.grid(row=0, column=0, sticky="nsew")
-        scrollbar.grid(row=0, column=1, sticky="ns")
-        filter_frame.rowconfigure(0, weight=1)
-
-        self.filter_entries_container = ttk.Frame(canvas)
-        self.filter_entries_container.columnconfigure(1, weight=1)
-        canvas_window = canvas.create_window((0, 0), window=self.filter_entries_container, anchor="nw")
-
-        def _resize_canvas(_event: tk.Event) -> None:
-            canvas.configure(scrollregion=canvas.bbox("all"))
-
-        def _resize_inner(event: tk.Event) -> None:
-            canvas.itemconfigure(canvas_window, width=event.width)
-
-        self.filter_entries_container.bind("<Configure>", _resize_canvas)
-        canvas.bind("<Configure>", _resize_inner)
-
-        actions = ttk.LabelFrame(parent, text="Actions", padding=8)
-        actions.grid(row=4, column=0, sticky="ew")
-        actions.columnconfigure(0, weight=1)
-
-        ttk.Button(actions, text="Delete Selected Rows", command=self.delete_selected_rows).grid(row=0, column=0, sticky="ew", pady=(0, 4))
-        ttk.Button(actions, text="Restore Selected Rows", command=self.restore_selected_rows).grid(row=1, column=0, sticky="ew", pady=4)
-        ttk.Button(actions, text="Restore All Pending", command=self.restore_all_rows).grid(row=2, column=0, sticky="ew", pady=4)
-        ttk.Button(actions, text="Preview Changes", command=self.show_diff_preview).grid(row=3, column=0, sticky="ew", pady=4)
-        ttk.Button(actions, text="Save With Backup", command=self.save_changes).grid(row=4, column=0, sticky="ew", pady=(4, 0))
-
-    def _build_content(self, parent: ttk.PanedWindow) -> None:
-        table_frame = ttk.Frame(parent, padding=8)
+    def _build_table(self, table_frame: ttk.Frame) -> None:
         table_frame.columnconfigure(0, weight=1)
         table_frame.rowconfigure(0, weight=1)
-        parent.add(table_frame, weight=3)
-
-        detail_frame = ttk.Frame(parent, padding=8)
-        detail_frame.columnconfigure(0, weight=1)
-        detail_frame.rowconfigure(1, weight=1)
-        parent.add(detail_frame, weight=1)
 
         self.tree = ttk.Treeview(table_frame, columns=(), show="headings", selectmode="extended")
         self.tree.grid(row=0, column=0, sticky="nsew")
@@ -170,6 +148,23 @@ class JsonLogViewerApp:
         x_scroll.grid(row=1, column=0, sticky="ew")
         self.tree.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
 
+    def _build_middle_bottom(self, parent: ttk.Frame) -> None:
+        actions = ttk.LabelFrame(parent, text="Actions", padding=8)
+        actions.grid(row=0, column=0, sticky="new")
+        actions.columnconfigure(0, weight=1)
+
+        ttk.Button(actions, text="Delete Selected Rows", command=self.delete_selected_rows).grid(row=0, column=0, sticky="ew", pady=(0, 4))
+        ttk.Button(actions, text="Restore Selected Rows", command=self.restore_selected_rows).grid(row=1, column=0, sticky="ew", pady=4)
+        ttk.Button(actions, text="Restore All Pending", command=self.restore_all_rows).grid(row=2, column=0, sticky="ew", pady=4)
+        ttk.Button(actions, text="Preview Changes", command=self.show_diff_preview).grid(row=3, column=0, sticky="ew", pady=4)
+        ttk.Button(actions, text="Save With Backup", command=self.save_changes).grid(row=4, column=0, sticky="ew", pady=(4, 0))
+
+        ttk.Frame(parent).grid(row=1, column=0, sticky="nsew")
+
+    def _build_detail(self, detail_frame: ttk.Frame) -> None:
+        detail_frame.columnconfigure(0, weight=1)
+        detail_frame.rowconfigure(1, weight=1)
+
         ttk.Label(detail_frame, text="Selected Record JSON").grid(row=0, column=0, sticky="w")
         self.detail_text = tk.Text(detail_frame, wrap="none")
         self.detail_text.grid(row=1, column=0, sticky="nsew")
@@ -179,6 +174,56 @@ class JsonLogViewerApp:
         detail_x = ttk.Scrollbar(detail_frame, orient="horizontal", command=self.detail_text.xview)
         detail_x.grid(row=2, column=0, sticky="ew")
         self.detail_text.configure(yscrollcommand=detail_y.set, xscrollcommand=detail_x.set)
+
+    def _build_scrollable_checkbox_panel(self, parent: ttk.Frame, row: int, height: int) -> tuple[ttk.Frame, tk.Canvas]:
+        panel = ttk.Frame(parent)
+        panel.grid(row=row, column=0, sticky="nsew")
+        panel.columnconfigure(0, weight=1)
+        panel.rowconfigure(0, weight=1)
+
+        canvas = tk.Canvas(panel, height=height, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(panel, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+
+        inner = ttk.Frame(canvas)
+        inner.columnconfigure(0, weight=1)
+        window_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def _resize_canvas(_event: tk.Event) -> None:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _resize_inner(event: tk.Event) -> None:
+            canvas.itemconfigure(window_id, width=event.width)
+
+        inner.bind("<Configure>", _resize_canvas)
+        canvas.bind("<Configure>", _resize_inner)
+        self._attach_mousewheel(canvas, canvas)
+        self._attach_mousewheel(inner, canvas)
+        return inner, canvas
+
+    def _attach_mousewheel(self, widget: tk.Widget, scroll_target: tk.Canvas) -> None:
+        def _on_mousewheel(event: tk.Event) -> None:
+            if event.delta:
+                scroll_target.yview_scroll(int(-event.delta / 120), "units")
+            elif getattr(event, "num", None) == 4:
+                scroll_target.yview_scroll(-3, "units")
+            elif getattr(event, "num", None) == 5:
+                scroll_target.yview_scroll(3, "units")
+
+        def _bind_global(_event: tk.Event) -> None:
+            self.root.bind_all("<MouseWheel>", _on_mousewheel, add="+")
+            self.root.bind_all("<Button-4>", _on_mousewheel, add="+")
+            self.root.bind_all("<Button-5>", _on_mousewheel, add="+")
+
+        def _unbind_global(_event: tk.Event) -> None:
+            self.root.unbind_all("<MouseWheel>")
+            self.root.unbind_all("<Button-4>")
+            self.root.unbind_all("<Button-5>")
+
+        widget.bind("<Enter>", _bind_global, add="+")
+        widget.bind("<Leave>", _unbind_global, add="+")
 
     def open_file(self) -> None:
         selected = filedialog.askopenfilename(
@@ -197,7 +242,10 @@ class JsonLogViewerApp:
 
         self.file_label_var.set(str(Path(path)))
         self.global_search_var.set("")
-        self.show_deleted_var.set(False)
+        self.column_search_var.set("")
+        self.show_deleted_var.set(True)
+        self.sort_column = ""
+        self.sort_descending = False
         self._populate_column_selectors()
         self.refresh_table()
         self.status_var.set(
@@ -222,47 +270,61 @@ class JsonLogViewerApp:
             return
 
         columns = self.document.columns
-        self.display_listbox.delete(0, tk.END)
-        self.filter_column_listbox.delete(0, tk.END)
+        self.display_column_vars = {}
+
+        for child in self.display_columns_container.winfo_children():
+            child.destroy()
+
+        default_display = set(default_columns(columns))
         for column in columns:
-            self.display_listbox.insert(tk.END, column)
-            self.filter_column_listbox.insert(tk.END, column)
+            display_var = tk.BooleanVar(value=column in default_display)
+            self.display_column_vars[column] = display_var
 
-        self.display_columns = default_columns(columns)
-        self._select_listbox_values(self.display_listbox, self.display_columns)
+        self.render_display_column_checkboxes()
         self.apply_display_columns()
-
-        filter_defaults = self.display_columns[: min(3, len(self.display_columns))]
-        self._select_listbox_values(self.filter_column_listbox, filter_defaults)
         self.rebuild_filter_entries()
 
-    def _select_listbox_values(self, listbox: tk.Listbox, values: list[str]) -> None:
-        options = listbox.get(0, tk.END)
-        desired = set(values)
-        for index, value in enumerate(options):
-            if value in desired:
-                listbox.selection_set(index)
-            else:
-                listbox.selection_clear(index)
+    def render_display_column_checkboxes(self) -> None:
+        for child in self.display_columns_container.winfo_children():
+            child.destroy()
+
+        search_text = self.column_search_var.get().strip().lower()
+        visible_columns = [
+            column for column in self.display_column_vars if not search_text or search_text in column.lower()
+        ]
+
+        if not visible_columns:
+            ttk.Label(self.display_columns_container, text="No matching columns.").grid(row=0, column=0, sticky="w")
+            return
+
+        for row_index, column in enumerate(visible_columns):
+            ttk.Checkbutton(
+                self.display_columns_container,
+                text=column,
+                variable=self.display_column_vars[column],
+                command=self.apply_display_columns,
+            ).grid(row=row_index, column=0, sticky="w")
 
     def apply_display_columns(self) -> None:
-        selected_indices = self.display_listbox.curselection()
-        self.display_columns = [self.display_listbox.get(index) for index in selected_indices]
+        self.display_columns = [
+            column for column, variable in self.display_column_vars.items() if variable.get()
+        ]
         self.refresh_table()
 
     def select_all_columns(self) -> None:
-        self.display_listbox.selection_set(0, tk.END)
+        for variable in self.display_column_vars.values():
+            variable.set(True)
         self.apply_display_columns()
 
     def reset_default_columns(self) -> None:
         if not self.document:
             return
-        self.display_columns = default_columns(self.document.columns)
-        self._select_listbox_values(self.display_listbox, self.display_columns)
+        defaults = set(default_columns(self.document.columns))
+        for column, variable in self.display_column_vars.items():
+            variable.set(column in defaults)
         self.apply_display_columns()
 
     def rebuild_filter_entries(self) -> None:
-        selected_columns = [self.filter_column_listbox.get(index) for index in self.filter_column_listbox.curselection()]
         existing_values = {column: var.get() for column, var in self.filter_vars.items()}
 
         for child in self.filter_entries_container.winfo_children():
@@ -271,12 +333,10 @@ class JsonLogViewerApp:
         self.filter_vars.clear()
         self.filter_entries.clear()
 
-        if not selected_columns:
-            ttk.Label(self.filter_entries_container, text="No filter columns selected.").grid(row=0, column=0, sticky="w")
-            self.refresh_table()
+        if not self.document:
             return
 
-        for row_index, column in enumerate(selected_columns):
+        for row_index, column in enumerate(self.document.columns):
             ttk.Label(self.filter_entries_container, text=column).grid(row=row_index, column=0, sticky="nw", padx=(0, 8), pady=2)
             variable = tk.StringVar(value=existing_values.get(column, ""))
             variable.trace_add("write", lambda *_args: self.refresh_table())
@@ -296,20 +356,36 @@ class JsonLogViewerApp:
             self.update_detail_panel()
             return
 
-        records = self.document.filtered_records(
-            global_search=self.global_search_var.get(),
-            column_filters=self.current_column_filters(),
-            include_deleted=self.show_deleted_var.get(),
-        )
+        try:
+            records = self.document.filtered_records(
+                global_search=self.global_search_var.get(),
+                column_filters=self.current_column_filters(),
+                include_deleted=self.show_deleted_var.get(),
+            )
+        except ValueError as exc:
+            self.tree.delete(*self.tree.get_children())
+            self.row_map.clear()
+            self.update_detail_panel()
+            self.status_var.set(str(exc))
+            return
+
+        if self.sort_column:
+            records = sorted(
+                records,
+                key=lambda record: sort_key_for_record(record, self.sort_column, self.document.deleted_indices),
+                reverse=self.sort_descending,
+            )
         self.filtered_records = records
 
         columns = ["__status__", *(self.display_columns or default_columns(self.document.columns))]
         self.tree.configure(columns=columns)
         for column in columns:
             label = "status" if column == "__status__" else column
+            if column == self.sort_column:
+                label = f"{label} {'▼' if self.sort_descending else '▲'}"
             width = 90 if column == "__status__" else 170
             stretch = False if column == "__status__" else True
-            self.tree.heading(column, text=label)
+            self.tree.heading(column, text=label, command=lambda selected=column: self.toggle_sort(selected))
             self.tree.column(column, width=width, anchor="w", stretch=stretch)
 
         self.tree.delete(*self.tree.get_children())
@@ -329,6 +405,14 @@ class JsonLogViewerApp:
             f"Backups will be written to {self.document.path.parent / '.backups'}"
         )
         self.update_detail_panel()
+
+    def toggle_sort(self, column: str) -> None:
+        if self.sort_column == column:
+            self.sort_descending = not self.sort_descending
+        else:
+            self.sort_column = column
+            self.sort_descending = False
+        self.refresh_table()
 
     def selected_record_indices(self) -> list[int]:
         selected_ids = self.tree.selection()
@@ -381,8 +465,8 @@ class JsonLogViewerApp:
         if not self.document:
             return
 
-        diff_text = self.document.preview_diff_text()
         deleted = self.document.deleted_records()
+        altered_summary = build_altered_rows_summary(deleted)
 
         window = tk.Toplevel(self.root)
         window.title("Pending Changes")
@@ -402,7 +486,7 @@ class JsonLogViewerApp:
         deleted_frame = ttk.Frame(notebook, padding=8)
         deleted_frame.columnconfigure(0, weight=1)
         deleted_frame.rowconfigure(0, weight=1)
-        notebook.add(deleted_frame, text="Removed Records")
+        notebook.add(deleted_frame, text="Affected Rows")
 
         deleted_text = tk.Text(deleted_frame, wrap="none")
         deleted_text.grid(row=0, column=0, sticky="nsew")
@@ -413,14 +497,34 @@ class JsonLogViewerApp:
         deleted_text.configure(yscrollcommand=deleted_y.set, xscrollcommand=deleted_x.set)
         deleted_text.insert(
             "1.0",
-            "\n\n".join(
-                f"Original index: {record.index}\n{json.dumps(record.original, indent=2, ensure_ascii=False, sort_keys=True)}"
-                for record in deleted
-            )
-            if deleted
-            else "No pending deletions.",
+            altered_summary,
         )
         deleted_text.configure(state="disabled")
+
+        deleted_table_frame = ttk.Frame(notebook, padding=8)
+        deleted_table_frame.columnconfigure(0, weight=1)
+        deleted_table_frame.rowconfigure(0, weight=1)
+        notebook.add(deleted_table_frame, text="Deleted Rows Table")
+
+        preview_columns = ["__status__", *(self.display_columns or default_columns(self.document.columns))]
+        deleted_tree = ttk.Treeview(deleted_table_frame, columns=preview_columns, show="headings")
+        deleted_tree.grid(row=0, column=0, sticky="nsew")
+        for column in preview_columns:
+            label = "status" if column == "__status__" else column
+            width = 90 if column == "__status__" else 180
+            deleted_tree.heading(column, text=label)
+            deleted_tree.column(column, width=width, anchor="w", stretch=True)
+
+        deleted_tree.tag_configure("deleted", foreground="#a00000")
+        for record in deleted:
+            values = ["deleted", *[record.flattened.get(column, "") for column in preview_columns[1:]]]
+            deleted_tree.insert("", tk.END, values=values, tags=("deleted",))
+
+        deleted_table_y = ttk.Scrollbar(deleted_table_frame, orient="vertical", command=deleted_tree.yview)
+        deleted_table_y.grid(row=0, column=1, sticky="ns")
+        deleted_table_x = ttk.Scrollbar(deleted_table_frame, orient="horizontal", command=deleted_tree.xview)
+        deleted_table_x.grid(row=1, column=0, sticky="ew")
+        deleted_tree.configure(yscrollcommand=deleted_table_y.set, xscrollcommand=deleted_table_x.set)
 
         diff_frame = ttk.Frame(notebook, padding=8)
         diff_frame.columnconfigure(0, weight=1)
@@ -434,8 +538,31 @@ class JsonLogViewerApp:
         diff_x = ttk.Scrollbar(diff_frame, orient="horizontal", command=diff_widget.xview)
         diff_x.grid(row=1, column=0, sticky="ew")
         diff_widget.configure(yscrollcommand=diff_y.set, xscrollcommand=diff_x.set)
-        diff_widget.insert("1.0", diff_text or "No changes.")
+        diff_widget.insert("1.0", "Open this tab to generate the unified diff.")
         diff_widget.configure(state="disabled")
+
+        diff_loaded = False
+
+        def load_diff_if_needed() -> None:
+            nonlocal diff_loaded
+            if diff_loaded:
+                return
+            diff_loaded = True
+            diff_widget.configure(state="normal")
+            diff_widget.delete("1.0", tk.END)
+            diff_widget.insert("1.0", "Generating diff...")
+            diff_widget.update_idletasks()
+            diff_text = self.document.preview_diff_text()
+            diff_widget.delete("1.0", tk.END)
+            diff_widget.insert("1.0", diff_text or "No changes.")
+            diff_widget.configure(state="disabled")
+
+        def on_tab_changed(_event: tk.Event) -> None:
+            current_tab = notebook.tab(notebook.select(), "text")
+            if current_tab == "Unified Diff":
+                window.after(10, load_diff_if_needed)
+
+        notebook.bind("<<NotebookTabChanged>>", on_tab_changed)
 
     def save_changes(self) -> None:
         if not self.document:
@@ -470,3 +597,39 @@ def default_columns(columns: list[str], limit: int = 8) -> list[str]:
     scalar_like = [column for column in columns if "." not in column and "[" not in column]
     preferred = scalar_like or columns
     return preferred[:limit]
+
+
+def sort_key_for_record(record: Record, column: str, deleted_indices: set[int]) -> tuple[int, int, str | float]:
+    if column == "__status__":
+        status = "deleted" if record.index in deleted_indices else "active"
+        return (0, 0, status)
+
+    raw_value = record.flattened.get(column, "")
+    normalized = raw_value.strip().lower()
+
+    try:
+        numeric = float(normalized)
+        return (0, 1, numeric)
+    except ValueError:
+        return (1, 1, normalized)
+
+
+def build_altered_rows_summary(deleted: list[Record]) -> str:
+    sections: list[str] = []
+
+    if deleted:
+        deleted_text = "\n\n".join(
+            f"Status: deleted\nOriginal index: {record.index}\n"
+            f"{json.dumps(record.original, indent=2, ensure_ascii=False, sort_keys=True)}"
+            for record in deleted
+        )
+        sections.append(f"Deleted rows ({len(deleted)}):\n\n{deleted_text}")
+    else:
+        sections.append("Deleted rows (0):\n\nNone.")
+
+    sections.append(
+        "Altered rows (0):\n\n"
+        "None. The current viewer supports deletion workflows only, so rows are either active or marked deleted."
+    )
+
+    return "\n\n".join(sections)
