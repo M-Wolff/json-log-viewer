@@ -13,9 +13,9 @@
 - Lets you choose visible columns using checkbox lists and a column-name search box
 - Shows all column filters in one scrollable panel; any non-empty filter is active automatically
 - Uses regex matching for global search and per-column filters
-- Supports temporary derived columns created from Python expressions or scripts in the GUI
+- Supports temporary derived columns created from trusted Python expressions or scripts in the GUI
   - temporary columns are never written to json file, they only exist in the GUI
-  - can be defined by scripting in python with limited capabilities (see section **Derived Column Helpers**)
+  - scripts execute locally as Python, so only run code you wrote or have reviewed (see section **Derived Column Helpers**)
   - Provides basic syntax highlighting in the derived-column script editor
 - Supports ascending and descending sorting by clicking table headers
 - Supports global text search and per-column substring filters
@@ -43,13 +43,15 @@ json-log-viewer [results.json]
 
 ## Notes
 
-- Filtering is case-insensitive substring matching.
+- Filtering is case-insensitive regex matching. Complex regex patterns on large files can make the GUI slow or unresponsive.
 - Saving currently writes deletion-only changes. The app does not edit field values.
 - If the JSON file contains several nested lists, the viewer edits the largest detected list and preserves the rest of the document structure on save.
 
 ## Derived Column Helpers
 
-The `Derived Columns` box lets you create temporary GUI-only columns using a Python expression or a small script that assigns to a variable `result` or simply evaluates to one single number / value (e.g. float, String, ...).
+The `Derived Columns` box lets you create temporary GUI-only columns using a trusted Python expression or a small script that assigns to a variable `result` or simply evaluates to one single number / value (e.g. float, String, ...).
+
+Treat derived-column scripts like any other local Python code: only run code you wrote yourself or have reviewed and trust. It is **NOT** a true sandbox.
 
 These derived columns are never written back to the JSON file.
 
