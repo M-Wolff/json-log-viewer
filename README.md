@@ -27,6 +27,10 @@
 
 ![<Demo image>](images/demo.png)
 
+## ToDos
+
+- add functionality to export currently filtered table, including derived columns, as a LaTeX-table.
+
 ## Run
 
 Install the package locally:
