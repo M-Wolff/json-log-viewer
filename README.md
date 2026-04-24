@@ -25,12 +25,19 @@
 - Shows a dedicated deleted-rows table in the preview window
 - Always creates a timestamped backup in `.backups/` next to the source file before writing
 
+![<Demo image>](images/demo.png)
+
 ## Run
 
-Install the package locally and use the console script:
+Install the package locally:
 
 ```bash
 pip install -e .
+```
+
+And run it with an optional path to a json file:
+
+```bash
 json-log-viewer [results.json]
 ```
 
